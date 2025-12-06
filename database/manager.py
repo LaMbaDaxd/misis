@@ -1,155 +1,150 @@
 import sqlite3
-import os
+from datetime import datetime, date
+from typing import List, Dict, Any
 
-# Путь к БДsqlite3 имя_файла.db
-DB_PATH = "database.db"
+from config.settings import DATABASE_PATH
+from models.user import User
+from models.habit import Habit
 
-def init_db():
-    """Инициализирует базу данных — создаёт таблицу habits, если её нет."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS habits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            period TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT NOT NULL,
-        email TEXT NOT NULL
-    )
-''')
+DB_PATH = DATABASE_PATH
 
-    conn.commit()
-    conn.close()
-    print("Таблица habits создана/проверена.")
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id     INTEGER PRIMARY KEY,
+    username    TEXT,
+    first_name  TEXT,
+    created_at  TEXT
+);
 
-def add_habit(user_id: int, name: str, period: str) -> int:
-    """Добавляет привычку в БД и возвращает её ID."""
-    conn = None
+CREATE TABLE IF NOT EXISTS habits (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    period     TEXT NOT NULL,          -- например: daily / weekly / custom
+    created_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS entries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    habit_id   INTEGER NOT NULL,
+    date       TEXT NOT NULL,
+    done       INTEGER NOT NULL DEFAULT 1,
+    note       TEXT,
+    created_at TEXT,
+    FOREIGN KEY (habit_id) REFERENCES habits(id)
+);
+"""
+
+
+def get_connection() -> sqlite3.Connection:
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db() -> None:
+    """Создаёт файл базы данных и таблицы, если их ещё нет."""
+    conn = get_connection()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute(
-            'INSERT INTO habits (user_id, name, period, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
-            (user_id, name, period)
-        )
+        conn.executescript(SCHEMA)
         conn.commit()
-        habit_id = cur.lastrowid
-        return habit_id
-    except sqlite3.Error as e:
-        print(f"Ошибка при добавлении привычки: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-def list_habits() -> list:
-    """Возвращает список всех привычек из БД."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM habits')
-    habits = cur.fetchall()
-    conn.close()
-    return habits
-
-if __name__ == "__main__":
-    # Запуск инициализации БД при запуске скрипта
-    init_db()
-    print("База данных готова.")
-
-    # Пример добавления привычки (можно убрать или закомментировать)
-    # habit_id = add_habit(1, "Читать книгу", "ежедневно")
-    # print(f"Добавлена привычка с ID: {habit_id}")
-
-    # Пример вывода списка привычек
-    habits = list_habits()
-    print("Список привычек:")
-    for habit in habits:
-        print(habit)
-
-
-
-
-def add_user(user_id: int, username: str, email: str) -> int:
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        'INSERT INTO users (user_id, username, email) VALUES (?, ?, ?)',
-        (user_id, username, email)
-    )
-    conn.commit()
-    conn.close()
-    return user_id
-
-def remove_habit(habit_id: int) -> bool:
-    conn = sqlite3.connect('database.db')
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM habits WHERE id = ?", (habit_id,))
-    conn.commit()
-    conn.close()
-    return cursor.rowcount > 0  # Возвращает True, если строка удалена
-
-
-def add_entry(user_id: int, habit_id: int, completed: bool, date: str) -> bool:
-    """
-    Добавляет новую запись о выполнении привычки.
-    
-    :param user_id: ID пользователя
-    :param habit_id: ID привычки
-    :param completed: Выполнена ли привычка (True/False)
-    :param date: Дата выполнения (в формате YYYY-MM-DD)
-    :return: True, если запись добавлена, False — в случае ошибки
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute(
-            "INSERT INTO entries (user_id, habit_id, completed, date) VALUES (?, ?, ?, ?)",
-            (user_id, habit_id, completed, date)
-        )
-        conn.commit()
-        return True
-    except sqlite3.Error as e:
-        print(f"Ошибка при добавлении записи: {e}")
-        return False
     finally:
         conn.close()
 
-def get_stats(user_id: int) -> dict:
-    """
-    Получает статистику выполнения привычек для пользователя.
-    
-    :param user_id: ID пользователя
-    :return: Словарь с данными о статистике
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
+
+def get_or_create_user(user_id: int, username: str | None, first_name: str | None) -> User:
+    conn = get_connection()
     try:
-        # Получаем общее количество записей и выполненных привычек
-        cursor.execute(
-            "SELECT COUNT(*), SUM(completed) FROM entries WHERE user_id = ?",
-            (user_id,)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name FROM users WHERE user_id = ?",
+            (user_id,),
         )
-        total, completed = cursor.fetchone()
-        
-        # Рассчитываем процент выполнения
-        completion_rate = (completed / total) * 100 if total > 0 else 0
-        
-        return {
-            "total_entries": total,
-            "completed_entries": completed,
-            "completion_rate": round(completion_rate, 2)
-        }
-    except sqlite3.Error as e:
-        print(f"Ошибка при получении статистики: {e}")
-        return {}
+        row = cur.fetchone()
+        if row:
+            return User(user_id=row[0], username=row[1], first_name=row[2])
+
+        created_at = datetime.utcnow().isoformat()
+        cur.execute(
+            "INSERT INTO users (user_id, username, first_name, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, username, first_name, created_at),
+        )
+        conn.commit()
+        return User(user_id=user_id, username=username, first_name=first_name)
+    finally:
+        conn.close()
+
+
+def add_habit(user_id: int, name: str, period: str) -> Habit:
+    """Добавляет новую привычку пользователю."""
+    conn = get_connection()
+    try:
+        created_at = datetime.utcnow().isoformat()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO habits (user_id, name, period, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, name, period, created_at),
+        )
+        habit_id = cur.lastrowid
+        conn.commit()
+        return Habit(id=habit_id, user_id=user_id, name=name, period=period)
+    finally:
+        conn.close()
+
+
+def list_habits(user_id: int) -> List[Habit]:
+    """Возвращает список привычек пользователя."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, user_id, name, period FROM habits WHERE user_id = ? ORDER BY id",
+            (user_id,),
+        )
+        rows = cur.fetchall()
+        return [Habit(id=row[0], user_id=row[1], name=row[2], period=row[3]) for row in rows]
+    finally:
+        conn.close()
+
+
+def add_entry(
+    habit_id: int,
+    on_date: date | None = None,
+    done: bool = True,
+    note: str | None = None,
+) -> None:
+    """Добавляет отметку выполнения привычки."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        if on_date is None:
+            on_date = date.today()
+        created_at = datetime.utcnow().isoformat()
+        cur.execute(
+            "INSERT INTO entries (habit_id, date, done, note, created_at) VALUES (?, ?, ?, ?, ?)",
+            (habit_id, on_date.isoformat(), int(done), note, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_stats(user_id: int) -> Dict[int, Dict[str, Any]]:
+    """
+    Простая статистика: по каждой привычке — сколько всего записей и сколько выполнений.
+    Возвращает словарь {habit_id: {"total": ..., "done": ...}}
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM habits WHERE user_id = ?", (user_id,))
+        habits = cur.fetchall()
+        out: Dict[int, Dict[str, Any]] = {}
+        for (hid,) in habits:
+            cur.execute("SELECT COUNT(*) FROM entries WHERE habit_id = ?", (hid,))
+            total = cur.fetchone()[0] or 0
+            cur.execute("SELECT COUNT(*) FROM entries WHERE habit_id = ? AND done = 1", (hid,))
+            done = cur.fetchone()[0] or 0
+            out[hid] = {"total": total, "done": done}
+        return out
     finally:
         conn.close()

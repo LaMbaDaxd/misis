@@ -1,52 +1,151 @@
-from aiogram import types, Dispatcher
-from database import Database
+from aiogram import Router, F
+from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
-db = Database()
+from ai.agent import ask_ai
+from database.manager import get_or_create_user, add_habit, list_habits
 
-@dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    username = message.from_user.username
-    first_name = message.from_user.first_name
+router = Router()
 
-    db.add_user(user_id, username, first_name)
-    await message.answer(f"Привет, {first_name}! Я бот для отслеживания привычек.")
 
-@dp.message_handler(commands=['add_habit'])
-async def add_habit(message: types.Message):
-    args = message.text.split()[1:]  # Пример: /add_habit бег ежедневно 7
-    if len(args) != 3:
-        await message.answer("Формат: /add_habit <название> <частота> <цель>")
+class AddHabitStates(StatesGroup):
+    """Состояния для пошагового добавления привычки."""
+    waiting_for_name = State()
+    waiting_for_period = State()
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура с основными действиями."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Добавить привычку")],
+            [KeyboardButton(text="📋 Мои привычки")],
+            [KeyboardButton(text="💡 Совет от ИИ")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    """Обработка /start: регистрируем пользователя и показываем меню."""
+    get_or_create_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+    )
+
+    await state.clear()
+    await message.answer(
+        "Привет! Я бот-трекер привычек.\n"
+        "Я помогу записывать привычки и иногда подскажу, что можно улучшить.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    """Краткая справка по возможностям бота."""
+    await message.answer(
+        "Я помогаю отслеживать привычки.\n\n"
+        "Доступные действия:\n"
+        "• /start — перезапустить бота и показать меню\n"
+        "• Добавить привычку — создать новую привычку\n"
+        "• Мои привычки — показать список\n"
+        "• Совет от ИИ — получить короткую рекомендацию",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(F.text == "➕ Добавить привычку")
+async def start_add_habit(message: Message, state: FSMContext) -> None:
+    """Запускаем сценарий добавления новой привычки."""
+    await state.set_state(AddHabitStates.waiting_for_name)
+    await message.answer("Какую привычку хотите отслеживать? Напишите её кратко, в одну строку.")
+
+
+@router.message(AddHabitStates.waiting_for_name)
+async def process_habit_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Пожалуйста, напишите название привычки текстом.")
         return
 
-    habit_name, frequency, goal = args
-    user_id = message.from_user.id
-    db.add_habit(user_id, habit_name, frequency, int(goal))
-    await message.answer(f"Привычка '{habit_name}' добавлена!")
+    await state.update_data(name=name)
+    await state.set_state(AddHabitStates.waiting_for_period)
+    await message.answer(
+        "Как часто вы хотите выполнять эту привычку?\n"
+        "Например: каждый день, 3 раза в неделю, по будням и т.п.",
+    )
 
-@dp.message_handler(commands=['my_habits'])
-async def my_habits(message: types.Message):
-    user_id = message.from_user.id
-    habits = db.get_habits(user_id)
+
+@router.message(AddHabitStates.waiting_for_period)
+async def process_habit_period(message: Message, state: FSMContext) -> None:
+    period = (message.text or "").strip()
+    if not period:
+        await message.answer("Опишите периодичность текстом, например: каждый день.")
+        return
+
+    data = await state.get_data()
+    name = data.get("name")
+    if not name:
+        await message.answer(
+            "Что-то пошло не так, давайте начнём сначала — выберите «Добавить привычку» в меню."
+        )
+        await state.clear()
+        return
+
+    add_habit(
+        user_id=message.from_user.id,
+        name=name,
+        period=period,
+    )
+    await state.clear()
+    await message.answer(
+        "Готово! Я добавил привычку:\n\n"
+        f"• {name}\n"
+        f"Периодичность: {period}\n\n"
+        "Теперь вы можете добавлять ещё привычки или посмотреть список.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(F.text == "📋 Мои привычки")
+async def show_habits(message: Message) -> None:
+    """Печатаем список привычек пользователя."""
+    habits = list_habits(message.from_user.id)
     if not habits:
-        await message.answer("У вас пока нет привычек.")
+        await message.answer(
+            "У вас пока нет сохранённых привычек.\n"
+            "Нажмите «➕ Добавить привычку», чтобы создать первую!",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
-    response = "Ваши привычки:\n"
-    for habit in habits:
-        response += f"- {habit[0]} ({habit[1]}) | Прогресс: {habit[3]}/{habit[2]}\n"
-    await message.answer(response)
+    lines = ["Ваши привычки:"]
+    for h in habits:
+        lines.append(f"• {h.name} — {h.period}")
+    await message.answer("\n".join(lines), reply_markup=main_menu_keyboard())
 
-@dp.message_handler(commands=['done'])
-async def done_habit(message: types.Message):
-    habit_name = message.text.split()[1]
-    user_id = message.from_user.id
-    db.update_habit_progress(user_id, habit_name)
-    await message.answer(f"Прогресс привычки '{habit_name}' обновлён!")
 
-@dp.message_handler(commands=['delete_habit'])
-async def delete_habit(message: types.Message):
-    habit_name = message.text.split()[1]
-    user_id = message.from_user.id
-    db.delete_habit(user_id, habit_name)
-    await message.answer(f"Привычка '{habit_name}' удалена.")
+@router.message(F.text == "💡 Совет от ИИ")
+async def ai_advice(message: Message) -> None:
+    """Получаем короткий совет от ИИ (или заглушку, если ИИ недоступен)."""
+    user_text = (
+        "Дай короткий совет по формированию привычек для пользователя Telegram. "
+        "У него могут быть как полезные, так и вредные привычки."
+    )
+    reply = await ask_ai(user_text)
+    await message.answer(reply, reply_markup=main_menu_keyboard())
+
+
+@router.message()
+async def fallback(message: Message) -> None:
+    """Обработчик по умолчанию на произвольный текст."""
+    await message.answer(
+        "Я пока понимаю только команды из меню и /help.\n"
+        "Попробуйте выбрать действие с клавиатуры ниже 🙂",
+        reply_markup=main_menu_keyboard(),
+    )
