@@ -1,10 +1,20 @@
+from __future__ import annotations
+
+from datetime import date
+from typing import Set, Optional
+
 from aiogram import Router, F
-from aiogram.filters import CommandStart, Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,  # Добавлен импорт CallbackQuery
+)
 
 from ai.agent import ask_ai
+
 from database.manager import (
     get_or_create_user,
     add_habit,
@@ -15,261 +25,248 @@ from database.manager import (
 
 router = Router()
 
+# Простенькое "состояние" в памяти процесса
+_pending_add_habit: Set[int] = set()
+_pending_mark_habit: Set[int] = set()
+_pending_ai_advice: Set[int] = set()  # Новое состояние для ожидания выбора привычки для совета
 
-class AddHabitStates(StatesGroup):
-    """Состояния для пошагового добавления привычки."""
-    waiting_for_name = State()
-    waiting_for_period = State()
-
-
-class MarkHabitStates(StatesGroup):
-    """Состояния для отметки выполнения привычки."""
-    waiting_for_choice = State()
-
+# ===================== Клавиатура =====================
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура с основными действиями."""
+    """Основное меню бота."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Добавить привычку"), KeyboardButton(text="📋 Мои привычки")],
-            [KeyboardButton(text="✅ Отметить выполнение"), KeyboardButton(text="📊 Статистика")],
+            [
+                KeyboardButton(text="➕ Добавить привычку"),
+                KeyboardButton(text="📋 Мои привычки"),
+            ],
+            [
+                KeyboardButton(text="✅ Отметить выполнение"),
+                KeyboardButton(text="📊 Статистика"),
+            ],
             [KeyboardButton(text="💡 Совет от ИИ")],
         ],
         resize_keyboard=True,
     )
 
+# ===================== Старт / help =====================
 
-@router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext) -> None:
-    """Обработка /start: регистрируем пользователя и показываем меню."""
-    get_or_create_user(
+@router.message(F.text == "/start")
+async def cmd_start(message: Message) -> None:
+    """Приветствие и регистрация пользователя в БД."""
+    user = get_or_create_user(
         user_id=message.from_user.id,
         username=message.from_user.username,
         first_name=message.from_user.first_name,
     )
 
-    await state.clear()
-    await message.answer(
-        "Привет! Я бот-трекер привычек.\n"
-        "Я помогу записывать привычки, отмечать выполнение и иногда подскажу, что можно улучшить.",
-        reply_markup=main_menu_keyboard(),
+    text = (
+        f"Привет, {user.first_name or 'друг'}! 👋\n\n"
+        "Я трекер привычек. Помогу тебе формировать полезные привычки и "
+        "отслеживать прогресс каждый день.\n\n"
+        "Выбери действие в меню ниже 👇"
     )
+    await message.answer(text, reply_markup=main_menu_keyboard())
 
-
-@router.message(Command("help"))
+@router.message(F.text == "/help")
 async def cmd_help(message: Message) -> None:
-    """Краткая справка по возможностям бота."""
-    await message.answer(
-        "Я помогаю отслеживать привычки.\n\n"
-        "Доступные действия:\n"
-        "• /start — перезапустить бота и показать меню\n"
-        "• /help — показать эту справку\n"
-        "• /done — отметить выполнение привычки за сегодня\n"
-        "• /stats — показать простую статистику\n\n"
-        "Или используйте кнопки меню:\n"
-        "• ➕ Добавить привычку\n"
-        "• 📋 Мои привычки\n"
-        "• ✅ Отметить выполнение\n"
-        "• 📊 Статистика\n"
-        "• 💡 Совет от ИИ",
-        reply_markup=main_menu_keyboard(),
+    text = (
+        "Я могу:\n"
+        "• добавлять привычки\n"
+        "• показывать твой список привычек\n"
+        "• отмечать выполнение\n"
+        "• показывать простую статистику\n"
+        "• давать совет от ИИ 💡\n\n"
+        "Используй кнопки внизу экрана."
     )
+    await message.answer(text, reply_markup=main_menu_keyboard())
 
-
-# ===================== Добавление привычки =====================
+# ===================== Добавить привычку =====================
 
 @router.message(F.text == "➕ Добавить привычку")
-async def start_add_habit(message: Message, state: FSMContext) -> None:
-    """Запускаем сценарий добавления новой привычки."""
-    await state.set_state(AddHabitStates.waiting_for_name)
-    await message.answer("Какую привычку хотите отслеживать? Напишите её кратко, в одну строку.")
+async def add_habit_start(message: Message) -> None:
+    """Шаг 1: просим ввести название привычки."""
+    _pending_add_habit.add(message.from_user.id)
 
-
-@router.message(AddHabitStates.waiting_for_name)
-async def process_habit_name(message: Message, state: FSMContext) -> None:
-    name = (message.text or "").strip()
-    if not name:
-        await message.answer("Пожалуйста, напишите название привычки текстом.")
-        return
-
-    await state.update_data(name=name)
-    await state.set_state(AddHabitStates.waiting_for_period)
     await message.answer(
-        "Как часто вы хотите выполнять эту привычку?\n"
-        "Например: каждый день, 3 раза в неделю, по будням и т.п.",
+        "Напиши название новой привычки одной строкой.\n\n"
+        "Например: <b>Пить стакан воды утром</b>\n"
+        "Чтобы отменить — отправь /cancel.",
+        parse_mode="HTML",
     )
 
-
-@router.message(AddHabitStates.waiting_for_period)
-async def process_habit_period(message: Message, state: FSMContext) -> None:
-    period = (message.text or "").strip()
-    if not period:
-        await message.answer("Опишите периодичность текстом, например: каждый день.")
-        return
-
-    data = await state.get_data()
-    name = data.get("name")
-    if not name:
-        await message.answer(
-            "Что-то пошло не так, давайте начнём сначала — выберите «Добавить привычку» в меню."
-        )
-        await state.clear()
-        return
-
-    add_habit(
-        user_id=message.from_user.id,
-        name=name,
-        period=period,
-    )
-    await state.clear()
-    await message.answer(
-        "Готово! Я добавил привычку:\n\n"
-        f"• {name}\n"
-        f"Периодичность: {period}\n\n"
-        "Теперь вы можете добавлять ещё привычки, отмечать выполнение или посмотреть список.",
-        reply_markup=main_menu_keyboard(),
-    )
-
-
-# ===================== Список привычек =====================
+# ===================== Мои привычки =====================
 
 @router.message(F.text == "📋 Мои привычки")
 async def show_habits(message: Message) -> None:
-    """Печатаем список привычек пользователя."""
+    """Показать список привычек пользователя."""
     habits = list_habits(message.from_user.id)
+
     if not habits:
         await message.answer(
-            "У вас пока нет сохранённых привычек.\n"
-            "Нажмите «➕ Добавить привычку», чтобы создать первую!",
+            "У тебя пока нет ни одной привычки.\n"
+            "Нажми «➕ Добавить привычку», чтобы начать 🙂",
             reply_markup=main_menu_keyboard(),
         )
         return
 
-    lines = ["Ваши привычки:"]
+    text_lines = ["Твои привычки:\n"]
     for h in habits:
-        lines.append(f"• {h.name} — {h.period}")
-    await message.answer("\n".join(lines), reply_markup=main_menu_keyboard())
+        text_lines.append(f"{h.id}. {h.name} (период: {h.period})")
 
+    await message.answer(
+        "\n".join(text_lines),
+        reply_markup=main_menu_keyboard(),
+    )
 
-# ===================== Отметка выполнения =====================
+# ===================== Отметить выполнение =====================
 
 @router.message(F.text == "✅ Отметить выполнение")
-@router.message(Command("done"))
-async def start_mark_done(message: Message, state: FSMContext) -> None:
-    """Начинаем сценарий отметки выполнения привычки за сегодня."""
+async def mark_habit_start(message: Message) -> None:
+    """Просим пользователя выбрать ID привычки для отметки."""
     habits = list_habits(message.from_user.id)
+
     if not habits:
         await message.answer(
-            "У вас пока нет привычек, которые можно отметить.\n"
-            "Сначала добавьте хотя бы одну привычку.",
+            "Сначала добавь хотя бы одну привычку 🙂",
             reply_markup=main_menu_keyboard(),
         )
         return
 
-    # Сохраняем список id привычек в состояние, чтобы потом по номеру найти нужную
-    habit_ids = [h.id for h in habits]
-    await state.update_data(habit_ids=habit_ids)
-    await state.set_state(MarkHabitStates.waiting_for_choice)
+    _pending_mark_habit.add(message.from_user.id)
 
-    lines = ["Выберите номер привычки, которую вы выполнили сегодня:"]
-    for i, h in enumerate(habits, start=1):
-        lines.append(f"{i}. {h.name} — {h.period}")
-    lines.append("\nОтправьте номер (например, 1).")
+    text_lines = ["Напиши номер привычки, которую ты сегодня выполнил:\n"]
+    for h in habits:
+        text_lines.append(f"{h.id}. {h.name}")
 
-    await message.answer("\n".join(lines), reply_markup=main_menu_keyboard())
-
-
-@router.message(MarkHabitStates.waiting_for_choice)
-async def process_mark_choice(message: Message, state: FSMContext) -> None:
-    """Обрабатываем номер привычки, которую нужно отметить как выполненную."""
-    text = (message.text or "").strip()
-    if not text.isdigit():
-        await message.answer("Пожалуйста, отправьте номер привычки (целое число).")
-        return
-
-    index = int(text)
-    data = await state.get_data()
-    habit_ids = data.get("habit_ids") or []
-
-    if not habit_ids or index < 1 or index > len(habit_ids):
-        await message.answer(
-            "Неверный номер привычки.\n"
-            "Попробуйте снова через «✅ Отметить выполнение».",
-            reply_markup=main_menu_keyboard(),
-        )
-        await state.clear()
-        return
-
-    # Определяем id привычки по номеру
-    habit_id = habit_ids[index - 1]
-
-    # Чтобы вывести название в ответе, снова получим список привычек
-    habits = list_habits(message.from_user.id)
-    habit = next((h for h in habits if h.id == habit_id), None)
-
-    add_entry(habit_id=habit_id)
-
-    await state.clear()
-
-    if habit is not None:
-        await message.answer(
-            f"Отметил выполнение привычки «{habit.name}» за сегодня 🎉",
-            reply_markup=main_menu_keyboard(),
-        )
-    else:
-        await message.answer(
-            "Отметка выполнения сохранена.",
-            reply_markup=main_menu_keyboard(),
-        )
-
+    text_lines.append("\nЧтобы отменить — отправь /cancel.")
+    await message.answer("\n".join(text_lines))
 
 # ===================== Статистика =====================
 
 @router.message(F.text == "📊 Статистика")
-@router.message(Command("stats"))
 async def show_stats(message: Message) -> None:
-    """Показываем простую статистику по привычкам пользователя."""
+    """Простая статистика по привычкам."""
     habits = list_habits(message.from_user.id)
     if not habits:
         await message.answer(
-            "У вас пока нет привычек, поэтому статистика отсутствует.\n"
-            "Добавьте привычку и начните отмечать выполнение.",
+            "Пока нет привычек — показывать нечего 🙂",
             reply_markup=main_menu_keyboard(),
         )
         return
 
     stats = get_stats(message.from_user.id)
 
-    lines = ["Ваша статистика по привычкам:\n"]
+    lines = ["📊 Статистика по привычкам:\n"]
     for h in habits:
-        st = stats.get(h.id, {"total": 0, "done": 0})
-        total = st.get("total", 0)
-        done = st.get("done", 0)
-        lines.append(f"• {h.name} — отметок: {done}")
+        s = stats.get(h.id, {"total": 0, "done": 0})
+        lines.append(f"{h.name}: {s['done']} из {s['total']} выполнений")
 
-    await message.answer("\n".join(lines), reply_markup=main_menu_keyboard())
-
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=main_menu_keyboard(),
+    )
 
 # ===================== Совет от ИИ =====================
 
 @router.message(F.text == "💡 Совет от ИИ")
-async def ai_advice(message: Message) -> None:
-    """Получаем короткий совет от ИИ (или заглушку, если ИИ недоступен)."""
-    user_text = (
-        "Дай короткий совет по формированию полезных привычек для пользователя Telegram. "
-        "Ответь по-дружески и по-русски."
-    )
-    reply = await ask_ai(user_text)
-    await message.answer(reply, reply_markup=main_menu_keyboard())
+async def ai_advice_start(message: Message) -> None:
+    """Начинаем процесс получения совета: показываем список привычек для выбора."""
+    habits = list_habits(message.from_user.id)
 
+    if not habits:
+        await message.answer(
+            "Сначала добавь хотя бы одну привычку, чтобы я мог дать полезный совет 🙂",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
 
-# ===================== Обработчик по умолчанию =====================
+    # Сохраняем состояние
+    _pending_ai_advice.add(message.from_user.id)
 
-@router.message()
-async def fallback(message: Message) -> None:
-    """Обработчик по умолчанию на произвольный текст."""
+    # Формируем клавиатуру с кнопками для каждой привычки
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for habit in habits:
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=habit.name,
+                callback_data=f"ai_advice_{habit.id}"
+            )
+        ])
+
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(
+            text="Отмена",
+            callback_data="ai_advice_cancel"
+        )
+    ])
+
     await message.answer(
-        "Я пока понимаю только команды из меню и /help.\n"
-        "Попробуйте выбрать действие с клавиатуры ниже 🙂",
-        reply_markup=main_menu_keyboard(),
+        "Выбери привычку, по которой хочешь получить совет:",
+        reply_markup=keyboard
     )
+
+@router.callback_query(F.data.startswith("ai_advice_"))
+async def handle_ai_advice_choice(callback: CallbackQuery) -> None:
+    """Обрабатываем выбор привычки для получения совета."""
+    user_id = callback.from_user.id
+    data = callback.data
+
+    # Если нажали "Отмена"
+    if data == "ai_advice_cancel":
+        await callback.message.edit_text("Выбор привычки отменён.")
+        _pending_ai_advice.discard(user_id)
+        await callback.answer()
+        return
+
+    if user_id not in _pending_ai_advice:
+        await callback.answer("Запрос устарел. Начни заново через меню.")
+        return
+
+    # Извлекаем ID привычки из callback_data
+    try:
+        habit_id = int(data.split("_")[-1])
+    except ValueError:
+        await callback.answer("Некорректный выбор привычки.")
+        return
+
+    # Получаем информацию о привычке
+    habits = list_habits(user_id)
+    habit = next((h for h in habits if h.id == habit_id), None)
+
+    if not habit:
+        await callback.answer("Привычка не найдена.")
+        return
+
+    # Убираем состояние
+    _pending_ai_advice.discard(user_id)
+
+    # Удаляем кнопки (редактируем сообщение)
+    await callback.message.edit_text(f"Выбрана привычка: {habit.name}\n\nИИ генерирует совет...")
+
+    # Получаем совет от ИИ
+    try:
+        advice = await ask_ai(
+            prompt=f"Дай совет по привычке: {habit.name}",
+            selected_habit=habit.name
+        )
+        
+        # Отправляем результат пользователю
+        await callback.message.answer(
+            f"💡 Совет от ИИ по привычке <b>«{habit.name}»</b>:\n\n"
+            f"{advice}\n\n"
+            f"Удачи в формировании привычки! 💪",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard()
+        )
+        
+        # Отправляем ответное уведомление (убирает "часики" на кнопке)
+        await callback.answer()
+        
+    except Exception as e:
+        print(f"Ошибка при получении совета от ИИ: {e}")
+        await callback.message.answer(
+            "Произошла ошибка при получении совета от ИИ. Попробуйте позже.",
+            reply_markup=main_menu_keyboard()
+        )
+        await callback.answer()
