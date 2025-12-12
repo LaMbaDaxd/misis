@@ -1,7 +1,7 @@
 import asyncio
 from typing import Optional
 
-from openai import OpenAI, OpenAIError  # pip install openai
+from openai import OpenAI, OpenAIError 
 
 from config.settings import OPENROUTER_API_KEY, OPENROUTER_MODEL
 
@@ -23,8 +23,8 @@ def _get_client() -> Optional[OpenAI]:
             base_url="https://openrouter.ai/api/v1",
             api_key=OPENROUTER_API_KEY,
             default_headers={
-                "HTTP-Referer": "https://your-bot-url.com",  # Опционально: URL вашего бота для ранжирования на OpenRouter
-                "X-Title": "Habit Tracker Bot",              # Опционально: название вашего бота
+                "HTTP-Referer": "https://your-bot-url.com", 
+                "X-Title": "Habit Tracker Bot",              
             }
         )
 
@@ -73,7 +73,6 @@ def _call_openrouter_sync(prompt: str, selected_habit: str) -> str:
     
 
     except OpenAIError as e:
-        # Ошибка от OpenRouter (аналог GroqError)
         text = str(e)
         print("OpenRouterError:", repr(e))
 
@@ -106,6 +105,6 @@ def _call_openrouter_sync(prompt: str, selected_habit: str) -> str:
             "Попробуй позже или просто выбери одну маленькую цель на сегодня."
         )
 
-async def ask_ai(prompt: str, selected_habit: str) -> str:  # ← добавили selected_habit
+async def ask_ai(prompt: str, selected_habit: str) -> str:
     """Асинхронная обёртка над запросом к OpenRouter с учётом выбранной привычки."""
     return await asyncio.to_thread(_call_openrouter_sync, prompt, selected_habit)

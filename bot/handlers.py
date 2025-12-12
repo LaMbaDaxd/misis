@@ -8,7 +8,7 @@ from aiogram.types import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    CallbackQuery,  # Добавлен импорт CallbackQuery
+    CallbackQuery,
 )
 from ai.agent import ask_ai
 from database.manager import (
@@ -21,10 +21,10 @@ from database.manager import (
 
 router = Router()
 
-# Простенькое "состояние" в памяти процесса
+
 _pending_add_habit: Set[int] = set()
 _pending_mark_habit: Set[int] = set()
-_pending_ai_advice: Set[int] = set()  # Новое состояние для ожидания выбора привычки для совета
+_pending_ai_advice: Set[int] = set() 
 
 # ===================== Клавиатура =====================
 
@@ -119,7 +119,7 @@ async def add_habit_finish(message: Message) -> None:
         add_habit(
             user_id=user_id,
             name=habit_name,
-            period="daily"  # или можно сделать выбор периода
+            period="daily" 
         )
         
         # Убираем пользователя из состояния ожидания
