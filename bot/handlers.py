@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 from datetime import date
 from typing import Set, Optional
-
 from aiogram import Router, F
 from aiogram.types import (
     Message,
@@ -12,9 +10,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,  # Добавлен импорт CallbackQuery
 )
-
 from ai.agent import ask_ai
-
 from database.manager import (
     get_or_create_user,
     add_habit,
@@ -81,8 +77,6 @@ async def cmd_help(message: Message) -> None:
     )
     await message.answer(text, reply_markup=main_menu_keyboard())
 
-# ===================== Добавить привычку =====================
-
 @router.message(F.text == "➕ Добавить привычку")
 async def add_habit_start(message: Message) -> None:
     """Шаг 1: просим ввести название привычки."""
@@ -94,6 +88,58 @@ async def add_habit_start(message: Message) -> None:
         "Чтобы отменить — отправь /cancel.",
         parse_mode="HTML",
     )
+
+
+@router.message(lambda m: m.from_user.id in _pending_add_habit)
+async def add_habit_finish(message: Message) -> None:
+    """Шаг 2: сохраняем введённую привычку."""
+    user_id = message.from_user.id
+    
+    # Проверяем команду отмены
+    if message.text and message.text.lower() == "/cancel":
+        _pending_add_habit.discard(user_id)
+        await message.answer(
+            "Добавление привычки отменено.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    
+    # Проверяем, что текст не пустой
+    if not message.text or not message.text.strip():
+        await message.answer(
+            "Название привычки не может быть пустым. Попробуй ещё раз.\n"
+            "Или отправь /cancel для отмены."
+        )
+        return
+    
+    habit_name = message.text.strip()
+    
+    # Сохраняем привычку в БД
+    try:
+        add_habit(
+            user_id=user_id,
+            name=habit_name,
+            period="daily"  # или можно сделать выбор периода
+        )
+        
+        # Убираем пользователя из состояния ожидания
+        _pending_add_habit.discard(user_id)
+        
+        await message.answer(
+            f"✅ Привычка <b>«{habit_name}»</b> добавлена!\n\n"
+            "Теперь ты можешь отмечать её выполнение каждый день.",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
+        )
+        
+    except Exception as e:
+        print(f"Ошибка при добавлении привычки: {e}")
+        await message.answer(
+            "Произошла ошибка при добавлении привычки. Попробуй ещё раз.",
+            reply_markup=main_menu_keyboard(),
+        )
+        _pending_add_habit.discard(user_id)
+
 
 # ===================== Мои привычки =====================
 
@@ -141,6 +187,74 @@ async def mark_habit_start(message: Message) -> None:
 
     text_lines.append("\nЧтобы отменить — отправь /cancel.")
     await message.answer("\n".join(text_lines))
+
+
+@router.message(lambda m: m.from_user.id in _pending_mark_habit)
+async def mark_habit_finish(message: Message) -> None:
+    """Обрабатываем номер привычки для отметки выполнения."""
+    user_id = message.from_user.id
+    
+    # Проверяем команду отмены
+    if message.text and message.text.lower() == "/cancel":
+        _pending_mark_habit.discard(user_id)
+        await message.answer(
+            "Отметка выполнения отменена.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+    
+    # Проверяем, что это число
+    if not message.text or not message.text.strip().isdigit():
+        await message.answer(
+            "Пожалуйста, отправь только номер привычки (цифру).\n"
+            "Или отправь /cancel для отмены."
+        )
+        return
+    
+    habit_id = int(message.text.strip())
+    
+    # Проверяем, существует ли такая привычка у пользователя
+    habits = list_habits(user_id)
+    habit = next((h for h in habits if h.id == habit_id), None)
+    
+    if not habit:
+        await message.answer(
+            f"Привычки с номером {habit_id} не найдено.\n"
+            "Проверь список привычек и попробуй ещё раз.\n"
+            "Или отправь /cancel для отмены."
+        )
+        return
+    
+    # Отмечаем выполнение в БД
+    try:
+        today = date.today()
+        success = add_entry(user_id=user_id, habit_id=habit_id, entry_date=today)
+        
+        # Убираем пользователя из состояния ожидания
+        _pending_mark_habit.discard(user_id)
+        
+        if success:
+            await message.answer(
+                f"✅ Отлично! Привычка <b>«{habit.name}»</b> отмечена как выполненная сегодня!",
+                parse_mode="HTML",
+                reply_markup=main_menu_keyboard(),
+            )
+        else:
+            await message.answer(
+                f"⚠ Похоже, привычка <b>«{habit.name}»</b> уже была отмечена сегодня.",
+                parse_mode="HTML",
+                reply_markup=main_menu_keyboard(),
+            )
+            
+    except Exception as e:
+        print(f"Ошибка при отметке привычки: {e}")
+        await message.answer(
+            "Произошла ошибка при отметке выполнения. Попробуй ещё раз.",
+            reply_markup=main_menu_keyboard(),
+        )
+        _pending_mark_habit.discard(user_id)
+
+
 
 # ===================== Статистика =====================
 

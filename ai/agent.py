@@ -106,7 +106,6 @@ def _call_openrouter_sync(prompt: str, selected_habit: str) -> str:
             "Попробуй позже или просто выбери одну маленькую цель на сегодня."
         )
 
-
-async def ask_ai(prompt: str, selected_habit: str) -> str:
+async def ask_ai(prompt: str, selected_habit: str) -> str:  # ← добавили selected_habit
     """Асинхронная обёртка над запросом к OpenRouter с учётом выбранной привычки."""
     return await asyncio.to_thread(_call_openrouter_sync, prompt, selected_habit)

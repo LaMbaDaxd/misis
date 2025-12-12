@@ -106,27 +106,50 @@ def list_habits(user_id: int) -> List[Habit]:
         conn.close()
 
 
-def add_entry(
-    habit_id: int,
-    on_date: date | None = None,
-    done: bool = True,
-    note: str | None = None,
-) -> None:
-    """Добавляет отметку выполнения привычки."""
+def add_entry(user_id: int, habit_id: int, entry_date: date) -> bool:
+    """
+    Добавляет запись о выполнении привычки за определённую дату.
+    Возвращает True если запись успешно добавлена, False если запись уже существует.
+    """
     conn = get_connection()
     try:
+        # Проверяем, существует ли уже запись для этой привычки на эту дату
         cur = conn.cursor()
-        if on_date is None:
-            on_date = date.today()
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM entries 
+            WHERE habit_id = ? AND date = ?
+            """,
+            (habit_id, entry_date.isoformat())
+        )
+        
+        exists = cur.fetchone()[0] > 0
+        
+        if exists:
+            print(f"Запись уже существует: habit_id={habit_id}, date={entry_date}")
+            return False
+        
+        # Создаём новую запись
         created_at = datetime.utcnow().isoformat()
         cur.execute(
-            "INSERT INTO entries (habit_id, date, done, note, created_at) VALUES (?, ?, ?, ?, ?)",
-            (habit_id, on_date.isoformat(), int(done), note, created_at),
+            """
+            INSERT INTO entries (habit_id, date, done, note, created_at) 
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (habit_id, entry_date.isoformat(), 1, "", created_at)
         )
+        
         conn.commit()
+        print(f"Запись добавлена: habit_id={habit_id}, date={entry_date}")
+        return True
+        
+    except Exception as e:
+        print(f"Ошибка при добавлении записи: {e}")
+        raise e
     finally:
         conn.close()
 
+        
 
 def get_stats(user_id: int) -> Dict[int, Dict[str, Any]]:
     """
